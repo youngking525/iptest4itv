@@ -3,27 +3,24 @@
 name: IP Validation
 
 on:
-  push:
-    branches:
-      - main
-  schedule:
-    - cron: '0 2 * * *'   # 每天凌晨2点触发
+  workflow_dispatch:   # 仅允许手动触发
 
 jobs:
   validate-ips:
     runs-on: ubuntu-latest
 
     steps:
+      # 步骤1：检出仓库内容
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.PAT_TOKEN }}   # 使用 Personal Access Token
 
+      # 步骤2：设置Python环境
       - name: Set up Python 3.11
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
+      # 步骤3：升级pip并安装依赖
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
@@ -31,13 +28,14 @@ jobs:
         run: |
           pip install requests dnspython
 
+      # 步骤4：运行Python脚本
       - name: Run IP Validation Script
         run: |
           python iptest.py
         env:
           PYTHONWARNINGS: "ignore:Unverified HTTPS request"
 
-      # 上传构件，以便查看脚本结果
+      # 步骤5：上传日志和输出文件作为构件（Artifacts）
       - name: Upload Logs and Outputs
         uses: actions/upload-artifact@v3
         with:
@@ -48,14 +46,3 @@ jobs:
             fail.txt
             true.txt
             1.txt
-
-      # 将生成的文件提交回仓库
-      - name: Commit and Push Changes
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add iptest.log itv-ip.txt fail.txt true.txt 1.txt
-          git commit -m "Update IP validation results [skip ci]"
-          git push origin main
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
