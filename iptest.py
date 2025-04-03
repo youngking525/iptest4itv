@@ -9,6 +9,7 @@ import random
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import logging
 
 # 文件路径定义（使用相对路径）
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,23 +29,19 @@ initial_urls = [
 ]
 
 # 创建或清空日志文件，并写入标题
+logging.basicConfig(
+    filename=log_file_path,
+    filemode='w',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 log_lock = threading.Lock()
 
-with open(log_file_path, 'w') as log_file:
-    log_file.write(f"IP 验证日志 - {datetime.datetime.now()}\n")
-    log_file.write("="*50 + "\n\n")
-
-def log(message):
-    """线程安全的日志记录函数。"""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    formatted_message = f"[{timestamp}] {message}\n"
+def thread_safe_log(message):
     with log_lock:
-        try:
-            with open(log_file_path, 'a') as log_file:
-                log_file.write(formatted_message)
-        except Exception:
-            pass  # 避免日志写入失败影响主流程
-    print(formatted_message, end='')
+        logging.info(message)
+    print(message, end='')
 
 def read_fail_ips(fail_file):
     """读取失败的 IP 地址，返回集合。"""
@@ -53,30 +50,28 @@ def read_fail_ips(fail_file):
             with open(fail_file, 'r') as f:
                 return set(line.strip() for line in f if line.strip())
         except Exception as e:
-            log(f"❌ 读取失败的 IP 文件失败，错误: {e}\n")
+            thread_safe_log(f"❌ 读取失败的 IP 文件失败，错误: {e}\n")
             return set()
     return set()
 
 def validate_ip(session, ip, initial_urls):
     """验证单个 IP 是否能够访问所有指定的 .m3u8 地址。"""
-    # 为每个 IP 随机打乱验证顺序
     randomized_urls = initial_urls.copy()
     random.shuffle(randomized_urls)
 
     for label, initial_url in randomized_urls:
-        log(f"验证 IP {ip} 的 {label}: ")
-
+        thread_safe_log(f"验证 IP {ip} 的 {label}: ")
         try:
             response = session.get(initial_url, allow_redirects=False, timeout=3)
             if response.status_code not in (301, 302):
-                log(f"初始请求返回非重定向状态码 {response.status_code}。\n")
+                thread_safe_log(f"初始请求返回非重定向状态码 {response.status_code}。\n")
                 return False
             redirect_url = response.headers.get('Location')
             if not redirect_url:
-                log(f"未找到重定向 URL。\n")
+                thread_safe_log(f"未找到重定向 URL。\n")
                 return False
         except requests.exceptions.RequestException as e:
-            log(f"初始请求失败，错误: {e}\n")
+            thread_safe_log(f"初始请求失败，错误: {e}\n")
             return False
 
         # 解析重定向后的 URL
@@ -111,12 +106,12 @@ def validate_ip(session, ip, initial_urls):
             response_final = session.get(final_url, headers=headers_final, timeout=3, verify=False)
             content_type = response_final.headers.get('Content-Type', '')
             if response_final.status_code == 200 and 'application/vnd.apple.mpegurl' in content_type:
-                log("有效\n")
+                thread_safe_log("有效\n")
             else:
-                log("无效\n")
+                thread_safe_log("无效\n")
                 return False
         except requests.exceptions.RequestException as e:
-            log(f"无效，错误: {e}\n")
+            thread_safe_log(f"无效，错误: {e}\n")
             return False
 
     return True
@@ -144,7 +139,7 @@ def ping_ip(ip):
                             return avg_latency
         return None
     except Exception as e:
-        log(f"❌ Ping {ip} 失败，错误: {e}\n")
+        thread_safe_log(f"❌ Ping {ip} 失败，错误: {e}\n")
         return None
 
 def append_to_file(file_path, ips):
@@ -160,7 +155,7 @@ def append_to_file(file_path, ips):
                     if ip:
                         existing_ips.add(ip)
         except Exception as e:
-            log(f"❌ 读取 {file_path} 失败，错误: {e}\n")
+            thread_safe_log(f"❌ 读取 {file_path} 失败，错误: {e}\n")
     new_ips = set(ips) - existing_ips
     if new_ips:
         try:
@@ -168,7 +163,7 @@ def append_to_file(file_path, ips):
                 for ip in new_ips:
                     f.write(f"{ip}\n")
         except Exception as e:
-            log(f"❌ 写入 {file_path} 失败，错误: {e}\n")
+            thread_safe_log(f"❌ 写入 {file_path} 失败，错误: {e}\n")
 
 def perform_ping_tests(valid_ips, max_ping=2):
     """对有效 IP 进行 Ping 测试，找出延迟最低的 IP。"""
@@ -234,7 +229,7 @@ def main():
     session.verify = False  # 忽略 SSL 验证
 
     # 设置最大线程数
-    max_threads = 2  # 设置为2线程
+    max_threads = 20  # 提高线程数以加快验证速度
 
     log("开始验证 IP 地址...\n")
 
@@ -260,26 +255,14 @@ def main():
                 try:
                     is_valid = future.result()
                     if is_valid:
-                        try:
-                            with open(true_file_path, 'a') as true_file:
-                                true_file.write(f"{ip}\n")
-                            log(f"🎉 IP {ip} 是有效的。\n\n")
-                        except Exception as e:
-                            log(f"❌ 写入 {true_file_path} 失败，错误: {e}\n")
+                        append_to_file(true_file_path, [ip])
+                        log(f"🎉 IP {ip} 是有效的。\n\n")
                     else:
-                        try:
-                            with open(fail_file_path, 'a') as fail_file:
-                                fail_file.write(f"{ip}\n")
-                            log(f"⚠️ IP {ip} 无效。\n\n")
-                        except Exception as e:
-                            log(f"❌ 写入 {fail_file_path} 失败，错误: {e}\n")
+                        append_to_file(fail_file_path, [ip])
+                        log(f"⚠️ IP {ip} 无效。\n\n")
                 except Exception as exc:
                     log(f"⚠️ IP {ip} 生成异常: {exc}\n")
-                    try:
-                        with open(fail_file_path, 'a') as fail_file:
-                            fail_file.write(f"{ip}\n")
-                    except Exception as e:
-                        log(f"❌ 写入 {fail_file_path} 失败，错误: {e}\n")
+                    append_to_file(fail_file_path, [ip])
 
     except Exception as e:
         log(f"❌ 多线程执行失败，错误: {e}\n")
@@ -316,6 +299,6 @@ def main():
     for vip in valid_ips:
         log(f"- {vip}\n")
     log("")
-    
+
 if __name__ == "__main__":
     main()
